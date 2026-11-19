@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -49,12 +50,23 @@ namespace Lageuhr
         DateTime naechsterAbgleich = DateTime.MinValue;
         DateTime? letzterAbgleich;
 
+        // Abgleich zwischen Arbeitsplätzen
+        readonly Abgleich abgleich = new Abgleich();
+        Einstellungen dialogBasis; // Stand beim Öffnen der Einstellungen (zum Zusammenführen)
+
+        // Update über GitHub (sucht nur; installiert wird nur auf Wunsch)
+        readonly Aktualisierung update = new Aktualisierung(Application.ExecutablePath);
+        DateTime naechsteUpdateSuche = DateTime.Now.AddSeconds(30);
+        bool updateMelden;          // Ergebnis der laufenden Suche als Meldung zeigen (Menü „Nach Update suchen“)
+        readonly bool nachUpdate;   // gerade nach einem Update gestartet
+
         const int NachlaufMinuten = 5;
         const TextFormatFlags TF = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
 
-        public Overlay(Einstellungen e)
+        public Overlay(Einstellungen e, bool nachUpdate = false)
         {
             einst = e;
+            this.nachUpdate = nachUpdate;
             FormBorderStyle = FormBorderStyle.None;
             MaximizeBox = false;
             ShowInTaskbar = false;
@@ -119,6 +131,20 @@ namespace Lageuhr
                     fertig?.Invoke(zeitStatus);
                 }));
             });
+        }
+
+        // ---------- Abgleich zwischen Arbeitsplätzen ----------
+
+        void AbgleichStarten()
+        {
+            abgleich.Starten(einst, a => { if (!IsDisposed && IsHandleCreated) BeginInvoke(a); else throw new ObjectDisposedException("Overlay"); },
+                () => einst, folge =>
+                {
+                    if (IsDisposed) return;
+                    if (folge != AbgleichFolge.Nichts) einst.Speichern();
+                    if (folge == AbgleichFolge.Neuzeichnen) letzteSignatur = "";
+                    if (dialog != null && !dialog.IsDisposed) dialog.AbgleichStatusZeigen(abgleich.StatusLang(einst));
+                });
         }
 
         // ---------- Maus, Andocken, Einklappen ----------
@@ -242,6 +268,16 @@ namespace Lageuhr
         {
             base.OnShown(e);
             Animieren(Bounds, Bounds, 0.0, ZielDeckkraft, 200, false); // sanft einblenden beim Start
+            if (nachUpdate)
+            {
+                var t = new Timer { Interval = 1500 };
+                t.Tick += (s, a) =>
+                {
+                    t.Stop(); t.Dispose();
+                    try { tray.ShowBalloonTip(8000, "Lageuhr", "Lageuhr auf " + Aktualisierung.Text(update.EigeneVersion) + " aktualisiert", ToolTipIcon.Info); } catch { }
+                };
+                t.Start();
+            }
         }
 
         /// <summary>Prüft im Takt, ob die Maus den ausgeklappten Kasten verlassen hat (1 s Nachlauf wie beim Mac-Dock).</summary>
@@ -396,6 +432,16 @@ namespace Lageuhr
         void MenueFuellen()
         {
             menue.Items.Clear();
+            if (update.Verfuegbar != null && !update.Installiert)
+            {
+                var mUpdate = update.Laeuft
+                    ? new ToolStripMenuItem("Update " + update.Verfuegbar.VersionText + ": " + update.Taetigkeit) { Enabled = false }
+                    : new ToolStripMenuItem("Update auf " + update.Verfuegbar.VersionText + " installieren …", null, (s, a) => UpdateInstallieren());
+                mUpdate.Font = new Font(mUpdate.Font, FontStyle.Bold);
+                if (mUpdate.Enabled) mUpdate.ForeColor = Color.FromArgb(47, 122, 48);
+                menue.Items.Add(mUpdate);
+                menue.Items.Add(new ToolStripSeparator());
+            }
             var mEinst = new ToolStripMenuItem("Einstellungen …", null, (s, a) => EinstellungenOeffnen());
             mEinst.Font = new Font(mEinst.Font, FontStyle.Bold);
             menue.Items.Add(mEinst);
@@ -460,6 +506,18 @@ namespace Lageuhr
             menue.Items.Add(new ToolStripSeparator());
             menue.Items.Add("Zeit jetzt mit Atomuhr abgleichen", null, (s, a) => ZeitAbgleichen(einst.Zeitserver));
             menue.Items.Add(new ToolStripMenuItem(zeitStatus) { Enabled = false });
+            if (Abgleich.Eingerichtet(einst))
+            {
+                menue.Items.Add(new ToolStripSeparator());
+                menue.Items.Add("Jetzt abgleichen", null, (s, a) => abgleich.Sofort());
+                menue.Items.Add(new ToolStripMenuItem(abgleich.Status(einst)) { Enabled = false });
+            }
+            if (update.Verfuegbar == null && !update.Installiert)
+            {
+                menue.Items.Add(new ToolStripSeparator());
+                if (update.Laeuft) menue.Items.Add(new ToolStripMenuItem("Suche nach Update …") { Enabled = false });
+                else menue.Items.Add("Nach Update suchen", null, (s, a) => UpdateSuchen(true));
+            }
 
             menue.Items.Add(new ToolStripSeparator());
             menue.Items.Add("Beenden", null, (s, a) => Close());
@@ -497,12 +555,16 @@ namespace Lageuhr
         {
             if (dialog == null || dialog.IsDisposed)
             {
+                dialogBasis = einst.Kopie();
                 dialog = new EinstellungenFenster(einst.Kopie(), Uebernehmen);
-                dialog.FormClosed += (s, a) => dialog = null;
+                dialog.FormClosed += (s, a) => { dialog = null; dialogBasis = null; };
                 dialog.Abgleichen = (server, fertig) => ZeitAbgleichen(server, fertig);
                 dialog.ZeitStatusZeigen(zeitStatus);
+                dialog.AbgleichStatusZeigen(abgleich.StatusLang(einst));
                 dialog.SchonerEinrichten = BildschirmschonerEinrichten;
+                dialog.UpdateAktion = UpdateKnopf;
                 dialog.Show();
+                UpdateStatusZeigen();
             }
             if (feldId != null) dialog.Auswaehlen(feldId);
             dialog.Activate();
@@ -510,17 +572,19 @@ namespace Lageuhr
 
         void Uebernehmen(Einstellungen neu)
         {
-            var n = neu.Kopie();
+            var n = Abgleich.Zusammenfuehren(einst, dialogBasis, neu); // was inzwischen kam, bleibt erhalten
             n.X = einst.X; n.Y = einst.Y; n.Pfad = einst.Pfad;
             n.Fixiert = einst.Fixiert; n.Durchklickbar = einst.Durchklickbar;
             einst = n;
             BackColor = einst.Hintergrund;
             Geaendert();
+            if (dialog != null && !dialog.IsDisposed) dialog.AbgleichStatusZeigen(abgleich.StatusLang(einst));
         }
 
         void Geaendert()
         {
             einst.Speichern();
+            abgleich.Bald(); // eigene Änderung: nach 0,3 s an die anderen Arbeitsplätze
             if (!Klappbar) eingeklappt = false;
             letzteSignatur = "";
             Takt();
@@ -552,10 +616,17 @@ namespace Lageuhr
             if (IsHandleCreated) VollbildPruefen(jetzt);
 
             // Wiederkehrende Termine: 5 Minuten nach Beginn auf den nächsten springen
-            bool weiter = Lagebild.TermineWeiterschalten(einst, jetzt);
+            bool weiter = Lagebild.TermineWeiterschalten(einst, jetzt); // zieht die bekannte Signatur mit (keine Änderung)
             if (weiter) einst.Speichern();
 
+            // Update: 30 s nach dem Start, dann täglich (nur suchen)
+            if (einst.UpdateSuchen && IsHandleCreated && !update.Laeuft && !update.Installiert && DateTime.Now >= naechsteUpdateSuche) UpdateSuchen(false);
+
+            // Abgleich: alle 3 s, nach eigener Änderung nach 0,3 s
+            if (IsHandleCreated && abgleich.Faellig(einst)) AbgleichStarten();
+
             var neu = Lagebild.BloeckeBauen(einst, jetzt);
+            if (abgleich.Warnung(einst) is string warnung) neu.Add(Lagebild.HinweisBlock(einst, warnung));
             string sig = Signatur(neu);
             if (sig != letzteSignatur)
             {
@@ -828,6 +899,130 @@ namespace Lageuhr
             if (schonerAusgesetzt) { SystemParametersInfoSetzen(SPI_SETSCREENSAVEACTIVE, 1, IntPtr.Zero, 0); schonerAusgesetzt = false; }
             SetThreadExecutionState(einst.VollbildNachMin > 0 ? ES_CONTINUOUS | ES_DISPLAY_REQUIRED : ES_CONTINUOUS);
             wachGehalten = einst.VollbildNachMin > 0;
+        }
+
+        // ---------- Update ----------
+
+        IWin32Window Besitzer => dialog != null && !dialog.IsDisposed ? (IWin32Window)dialog : this;
+
+        void NachUi(Action a)
+        {
+            try { if (!IsDisposed && IsHandleCreated) BeginInvoke(a); } catch { }
+        }
+
+        /// <summary>Im Hintergrund suchen; <paramref name="melden"/>: Ergebnis als Meldung (sonst nur Status im Menü und in den Einstellungen).</summary>
+        void UpdateSuchen(bool melden)
+        {
+            if (update.Installiert) return;
+            if (melden) updateMelden = true;
+            update.SucheStarten(() => NachUi(() =>
+            {
+                naechsteUpdateSuche = DateTime.Now.Add(update.Fehler != null ? TimeSpan.FromHours(2) : TimeSpan.FromHours(24));
+                UpdateStatusZeigen();
+                if (!updateMelden) return;
+                updateMelden = false;
+                if (update.Verfuegbar != null) UpdateInstallieren();
+                else if (update.Fehler != null)
+                    MessageBox.Show(Besitzer, "Nach Update suchen hat nicht geklappt:\n" + update.Fehler, "Lageuhr", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                else
+                    MessageBox.Show(Besitzer, "Die Lageuhr ist aktuell (" + Aktualisierung.Text(update.EigeneVersion) + ").", "Lageuhr", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }));
+            UpdateStatusZeigen();
+        }
+
+        /// <summary>Nachfragen, installieren, neu starten. <paramref name="vorher"/> läuft vor dem Neustart (Einstellungsfenster: übernehmen).</summary>
+        void UpdateInstallieren(Action vorher = null)
+        {
+            var info = update.Verfuegbar;
+            if (info == null || update.Laeuft || update.Installiert) return;
+            if (update.Schreibgeschuetzt) { SchreibgeschuetztMelden(); return; }
+            var sb = new StringBuilder("Lageuhr " + info.VersionText + " ist da.");
+            if (info.Neu.Count > 0)
+            {
+                sb.Append("\n\nNeu:");
+                foreach (var n in info.Neu.Take(15)) sb.Append("\n• ").Append(n);
+            }
+            sb.Append("\n\nJetzt installieren? Die Lageuhr startet danach neu; Felder und Einstellungen bleiben.");
+            if (MessageBox.Show(Besitzer, sb.ToString(), "Lageuhr – Update", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+
+            // als Bildschirmschoner eingerichtet (auch an anderer Stelle): mit ersetzen
+            try
+            {
+                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop"))
+                    if (k?.GetValue("SCRNSAVE.EXE") is string scr &&
+                        string.Equals(Path.GetFileName(scr), "Lageuhr.scr", StringComparison.OrdinalIgnoreCase) && !update.SchonerPfade.Contains(scr))
+                        update.SchonerPfade.Add(scr);
+            }
+            catch { }
+
+            update.InstallationStarten(info, (hinweise, fehler) => NachUi(() =>
+            {
+                UpdateStatusZeigen();
+                if (fehler != null)
+                {
+                    if (fehler.Schreibgeschuetzt) SchreibgeschuetztMelden();
+                    else MessageBox.Show(Besitzer, "Das Update hat nicht geklappt:\n" + fehler.Message + "\n\nDie Lageuhr läuft unverändert weiter.",
+                        "Lageuhr – Update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                if (hinweise != null && hinweise.Count > 0)
+                    MessageBox.Show(Besitzer, "Update installiert. Hinweis:\n" + string.Join("\n", hinweise), "Lageuhr – Update", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                try { vorher?.Invoke(); } catch { }
+                Neustarten();
+            }));
+            UpdateStatusZeigen();
+        }
+
+        void SchreibgeschuetztMelden()
+        {
+            var r = MessageBox.Show(Besitzer, "Die Lageuhr liegt in einem schreibgeschützten Ordner und kann sich nicht selbst aktualisieren:\n" +
+                Path.GetDirectoryName(update.ExePfad) + "\n\nDie neue Fassung gibt es auf der Download-Seite; die Lageuhr.exe dort ersetzen " +
+                "(oder die IT bitten).\n\nDownload-Seite jetzt öffnen?", "Lageuhr – Update", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+            if (r == DialogResult.Yes) DownloadSeiteOeffnen();
+        }
+
+        void DownloadSeiteOeffnen()
+        {
+            try { Process.Start(new ProcessStartInfo(Aktualisierung.DownloadSeite) { UseShellExecute = true }); }
+            catch (Exception ex) { MessageBox.Show(Besitzer, "Browser lässt sich nicht öffnen:\n" + ex.Message + "\n\n" + Aktualisierung.DownloadSeite, "Lageuhr"); }
+        }
+
+        /// <summary>Knopf im Einstellungsfenster: suchen, installieren oder Download-Seite – je nach Stand.</summary>
+        void UpdateKnopf(Action vorher)
+        {
+            if (update.Laeuft || update.Installiert) return;
+            if (update.Verfuegbar != null && update.Schreibgeschuetzt) DownloadSeiteOeffnen();
+            else if (update.Verfuegbar != null) UpdateInstallieren(vorher);
+            else UpdateSuchen(false);
+        }
+
+        void UpdateStatusZeigen()
+        {
+            if (dialog == null || dialog.IsDisposed) return;
+            string knopf = update.Verfuegbar != null && update.Schreibgeschuetzt ? "Download-Seite …"
+                : update.Verfuegbar != null ? "Installieren …" : "Jetzt suchen";
+            dialog.UpdateStatusZeigen(update.Status(), knopf, !update.Laeuft && !update.Installiert);
+        }
+
+        /// <summary>Neue Fassung mit --nach-update starten und sich beenden (sie wartet, bis diese beendet ist).</summary>
+        void Neustarten()
+        {
+            if (!Angedockt) { einst.X = Left; einst.Y = Top; }
+            einst.Speichern();
+            try
+            {
+                Process.Start(new ProcessStartInfo(update.ExePfad, "--nach-update")
+                {
+                    UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(update.ExePfad)
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(Besitzer, "Das Update ist installiert, aber die Lageuhr startet nicht von selbst neu:\n" + ex.Message +
+                    "\n\nBitte die Lageuhr neu starten.", "Lageuhr – Update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            if (dialog != null && !dialog.IsDisposed) dialog.Close();
+            Close();
         }
 
         // ---------- Bildschirmschoner einrichten ----------

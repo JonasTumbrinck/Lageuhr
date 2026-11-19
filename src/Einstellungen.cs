@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Lageuhr
 {
@@ -25,11 +26,20 @@ namespace Lageuhr
         public int Groesse = 100;      // Prozent der Schriftgröße
         public bool Sichtbar = true;
 
+        // Abgleich zwischen Arbeitsplätzen (Größe, sichtbar und Reihenfolge bleiben immer am eigenen Platz)
+        public bool Geteilt = true;    // mit anderen Arbeitsplätzen teilen (neu: an außer bei der Uhrzeit)
+        public long Geaendert;         // letzte Änderung der geteilten Werte, ms seit 1970 (UTC)
+        public string Von;             // Arbeitsplatz der letzten Änderung
+        public string Bekannt;         // Signatur der geteilten Werte beim letzten Senden/Empfangen
+        internal string Gestempelt;    // nur im Speicher: Signatur, für die Geaendert/Von gesetzt wurden
+
         public Feld() { }
         public Feld(FeldArt art, string titel = null, string text = "")
         {
-            Art = art; Titel = titel ?? StandardTitel(art); Text = text;
+            Art = art; Titel = titel ?? StandardTitel(art); Text = text; Geteilt = art != FeldArt.Uhr;
         }
+
+        public static bool IdGueltig(string id) => id != null && Regex.IsMatch(id, "^[A-Za-z0-9-]{8,64}$");
 
         public Feld Kopie() => (Feld)MemberwiseClone();
 
@@ -77,7 +87,16 @@ namespace Lageuhr
         public string Zeitserver = Lageuhr.Atomuhr.StandardServer;
         public int VollbildNachMin = 0;    // Vollbild-Lagebild nach so vielen Minuten ohne Eingabe (0 = aus)
         public bool VollbildAlle = true;   // auf allen Bildschirmen
+        public bool UpdateSuchen = true;   // beim Start und täglich auf GitHub nach einer neuen Fassung sehen (installiert nie selbst)
         public int? X, Y;
+
+        // Abgleich zwischen Arbeitsplätzen (server/PROTOKOLL.md)
+        public bool AbgleichAn = false;
+        public string AbgleichServer = "";
+        public string LageCode = "";
+        public string Arbeitsplatz = Environment.MachineName;
+        public long LageStand;             // letzte bekannte rev der Lage (0 = beitreten)
+        public List<string> LageIds = new List<string>(); // Ids der geteilten Felder (um Löschen zu erkennen)
 
         public static readonly Color StandardHintergrund = Color.FromArgb(24, 29, 37);
         public static readonly Color StandardSchrift = Color.White;
@@ -104,6 +123,7 @@ namespace Lageuhr
         {
             var k = (Einstellungen)MemberwiseClone();
             k.Felder = Felder.Select(f => f.Kopie()).ToList();
+            k.LageIds = new List<string>(LageIds);
             return k;
         }
 
@@ -160,7 +180,8 @@ namespace Lageuhr
             void S(string k, string v) => sb.Append(k).Append('=').AppendLine(Maskieren(v ?? ""));
             void B(string k, bool v) => S(k, v ? "1" : "0");
             void I(string k, int? v) => S(k, v?.ToString(CultureInfo.InvariantCulture) ?? "");
-            void D(string k, DateTime? v) => S(k, v?.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) ?? "");
+            void L(string k, long v) => S(k, v.ToString(CultureInfo.InvariantCulture));
+            void D(string k, DateTime? v) => S(k, v?.ToString(v.Value.Second != 0 ? "yyyy-MM-dd HH:mm:ss" : "yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) ?? "");
             void F(string k, Color? v) => S(k, v.HasValue ? Hex(v.Value) : "");
 
             B("Nebeneinander", Nebeneinander);
@@ -173,7 +194,10 @@ namespace Lageuhr
             B("DeckendBeiMaus", DeckendBeiMaus); I("Andocken", Andocken); B("Einklappen", Einklappen);
             B("Atomuhr", Atomuhr); S("Zeitserver", Zeitserver);
             I("VollbildNachMin", VollbildNachMin); B("VollbildAlle", VollbildAlle);
+            B("UpdateSuchen", UpdateSuchen);
             I("X", X); I("Y", Y);
+            B("Abgleich", AbgleichAn); S("AbgleichServer", AbgleichServer); S("LageCode", LageCode);
+            S("Arbeitsplatz", Arbeitsplatz); L("LageStand", LageStand); S("LageIds", string.Join(",", LageIds));
             I("Felder", Felder.Count);
             for (int i = 0; i < Felder.Count; i++)
             {
@@ -184,6 +208,8 @@ namespace Lageuhr
                 I(p + "Intervall", f.Intervall); B(p + "Sekunden", f.Sekunden);
                 F(p + "Schriftfarbe", f.Schriftfarbe); F(p + "Hintergrund", f.Hintergrund);
                 I(p + "Groesse", f.Groesse); B(p + "Sichtbar", f.Sichtbar);
+                S(p + "Id", f.Id); B(p + "Geteilt", f.Geteilt); L(p + "Geaendert", f.Geaendert);
+                S(p + "Von", f.Von); S(p + "Bekannt", f.Bekannt);
             }
 
             return sb.ToString();
@@ -232,22 +258,36 @@ namespace Lageuhr
             Zeitserver = string.IsNullOrWhiteSpace(W("Zeitserver")) ? Lageuhr.Atomuhr.StandardServer : W("Zeitserver");
             VollbildNachMin = Math.Max(0, Math.Min(240, Zahl(W("VollbildNachMin")) ?? 0));
             VollbildAlle = Bo("VollbildAlle", true);
+            UpdateSuchen = Bo("UpdateSuchen", true);
             X = Zahl(W("X")); Y = Zahl(W("Y"));
+            AbgleichAn = Bo("Abgleich", false);
+            AbgleichServer = (W("AbgleichServer") ?? "").Trim();
+            LageCode = (W("LageCode") ?? "").Trim();
+            Arbeitsplatz = string.IsNullOrWhiteSpace(W("Arbeitsplatz")) ? Environment.MachineName : W("Arbeitsplatz").Trim();
+            LageStand = Math.Max(0, Lang(W("LageStand")));
+            LageIds = (W("LageIds") ?? "").Split(',').Select(x => x.Trim()).Where(Feld.IdGueltig).Distinct().ToList();
 
             if (Zahl(W("Felder")) is int n)
             {
                 Felder = new List<Feld>();
+                var ids = new HashSet<string>();
                 for (int i = 1; i <= n; i++)
                 {
                     string p = "Feld" + i + ".";
                     if (!Enum.TryParse(W(p + "Art"), true, out FeldArt art)) continue;
-                    Felder.Add(new Feld
+                    var f = new Feld
                     {
                         Art = art, Titel = W(p + "Titel") ?? "", Text = W(p + "Text") ?? "", Zeit = Datum(W(p + "Zeit")),
                         Intervall = Math.Max(0, Zahl(W(p + "Intervall")) ?? 0), Sekunden = Bo(p + "Sekunden", true),
                         Schriftfarbe = Farbe(W(p + "Schriftfarbe")), Hintergrund = Farbe(W(p + "Hintergrund")),
                         Groesse = Math.Max(30, Math.Min(300, Zahl(W(p + "Groesse")) ?? 100)), Sichtbar = Bo(p + "Sichtbar", true),
-                    });
+                        Geteilt = Bo(p + "Geteilt", art != FeldArt.Uhr), Geaendert = Math.Max(0, Lang(W(p + "Geaendert"))),
+                        Von = string.IsNullOrEmpty(W(p + "Von")) ? null : W(p + "Von"),
+                        Bekannt = string.IsNullOrEmpty(W(p + "Bekannt")) ? null : W(p + "Bekannt"),
+                    };
+                    string id = W(p + "Id");
+                    if (Feld.IdGueltig(id) && ids.Add(id)) f.Id = id; // ältere Einstellungen ohne Id: neue Id (Standard)
+                    Felder.Add(f);
                 }
             }
             else if (W("UhrZeigen") != null)
@@ -270,8 +310,11 @@ namespace Lageuhr
         static int? Zahl(string v) =>
             int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out int i) ? i : (int?)null;
 
+        static long Lang(string v) =>
+            long.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out long l) ? l : 0;
+
         static DateTime? Datum(string v) =>
-            DateTime.TryParseExact(v, "yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)
+            DateTime.TryParseExact(v, new[] { "yyyy-MM-dd HH:mm", "yyyy-MM-dd HH:mm:ss" }, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)
                 ? d : (DateTime?)null;
 
         static Color? Farbe(string v)

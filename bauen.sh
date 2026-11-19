@@ -3,7 +3,7 @@
 # Braucht: dotnet-SDK (für Windows), Xcode-Befehlszeilenwerkzeuge (für macOS), python3.
 set -e
 cd "$(dirname "$0")"
-VERSION=1.4.2
+VERSION=1.5.0
 
 python3 werkzeuge/symbol.py src --gross
 
@@ -21,7 +21,7 @@ if command -v swiftc >/dev/null 2>&1; then
   APP=dist/mac/Lageuhr.app
   rm -rf dist/mac && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
   for ARCH in arm64 x86_64; do
-    swiftc -O -swift-version 5 -target $ARCH-apple-macos13.0 -o "$BAU/Lageuhr-$ARCH" mac/Gemeinsam.swift mac/Lageuhr.swift
+    swiftc -O -swift-version 5 -target $ARCH-apple-macos13.0 -o "$BAU/Lageuhr-$ARCH" mac/Gemeinsam.swift mac/Abgleich.swift mac/Update.swift mac/Lageuhr.swift
     swiftc -O -swift-version 5 -target $ARCH-apple-macos13.0 -emit-library -module-name LageuhrSchoner \
       -o "$BAU/Schoner-$ARCH" mac/Gemeinsam.swift mac/Schoner.swift -framework ScreenSaver
   done
@@ -85,3 +85,16 @@ EOF
 fi
 
 rm -f src/lageuhr.png.tmp
+
+# ---------- Versionsdatei für die Update-Funktion ----------
+# Wird mit .exe und Zip als Release-Datei hochgeladen; die Lageuhr liest sie unter
+# https://github.com/JonasTumbrinck/Lageuhr/releases/latest/download/lageuhr-version.txt
+# Zeilen „neu …“ (was sich geändert hat) stehen in neu.txt und werden im Update-Hinweis gezeigt.
+{
+  echo "version $VERSION"
+  for D in dist/windows/Lageuhr.exe dist/mac/Lageuhr-mac.zip; do
+    [ -f "$D" ] && echo "sha256 $(basename "$D") $(shasum -a 256 "$D" | cut -d' ' -f1)"
+  done
+  [ -f neu.txt ] && sed -e '/^[[:space:]]*$/d' -e 's/^/neu /' neu.txt
+} > dist/lageuhr-version.txt
+echo "Version: dist/lageuhr-version.txt"

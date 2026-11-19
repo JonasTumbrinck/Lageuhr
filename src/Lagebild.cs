@@ -79,18 +79,14 @@ namespace Lageuhr
             return p;
         }
 
-        /// <summary>Wiederkehrende Termine 5 Minuten nach Beginn auf den nächsten springen lassen.</summary>
-        public static bool TermineWeiterschalten(Einstellungen e, DateTime jetzt)
+        /// <summary>Wiederkehrende Termine 5 Minuten nach Beginn auf den nächsten springen lassen (zählt nicht als Änderung für den Abgleich).</summary>
+        public static bool TermineWeiterschalten(Einstellungen e, DateTime jetzt) => Abgleich.TermineWeiterschalten(e, jetzt);
+
+        /// <summary>Kleiner Hinweis unten im Kasten in Warnfarbe (z. B. „Abgleich getrennt seit 1432“).</summary>
+        public static Block HinweisBlock(Einstellungen e, string text)
         {
-            bool weiter = false;
-            foreach (var f in e.Felder)
-            {
-                if (f.Art != FeldArt.Termin || f.Intervall <= 0 || !(f.Zeit is DateTime t) || jetzt < t.AddMinutes(NachlaufMinuten)) continue;
-                while (jetzt >= t.AddMinutes(NachlaufMinuten)) t = t.AddMinutes(f.Intervall);
-                f.Zeit = t;
-                weiter = true;
-            }
-            return weiter;
+            Color gelb = Farben.Warnfarbe(e.Hintergrund, e.Schriftfarbe, Color.FromArgb(255, 193, 7), Color.FromArgb(178, 106, 0));
+            return new Block { Art = FeldArt.Text, Wert = text, TitelFarbe = gelb, WertFarbe = gelb, ZusatzFarbe = gelb, Faktor = 0.75f };
         }
 
         /// <summary>Baut aus den sichtbaren Feldern die anzuzeigenden Blöcke (Texte und Farben).</summary>

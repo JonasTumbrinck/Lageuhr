@@ -1,0 +1,2 @@
+Abgleich zwischen Arbeitsplätzen: gleicher Lage-Code, gleiche Felder an allen Plätzen
+Update-Funktion: Die Lageuhr sucht selbst nach neuen Versionen

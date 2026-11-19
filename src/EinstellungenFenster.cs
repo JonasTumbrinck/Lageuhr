@@ -21,9 +21,9 @@ namespace Lageuhr
         // ausgewähltes Feld
         GroupBox gbFeld;
         TableLayoutPanel tFeld;
-        Label lbArt, lbTaktisch;
+        Label lbArt, lbTaktisch, lbVon;
         TextBox tbTitel, tbText;
-        CheckBox cbSichtbar, cbSek, cbEigeneSchrift, cbEigenerGrund;
+        CheckBox cbSichtbar, cbSek, cbEigeneSchrift, cbEigenerGrund, cbGeteilt;
         DateTimePicker dtZeit;
         NumericUpDown nIntervall, nGroesse;
         Button btFeldSchrift, btFeldGrund, btJetzt;
@@ -51,6 +51,27 @@ namespace Lageuhr
         CheckBox cbVollbildAlle;
         static readonly int[] VollbildMinuten = { 0, 2, 5, 10, 15, 20, 30, 45, 60 };
         public void ZeitStatusZeigen(string t) { if (lbZeitStatus != null) lbZeitStatus.Text = t; }
+
+        // Update
+        CheckBox cbUpdate;
+        Button btUpdate;
+        Label lbUpdateStatus;
+        /// <summary>Knopf „Jetzt suchen“ / „Installieren …“ / „Download-Seite …“; bekommt „Übernehmen“ für vor dem Neustart.</summary>
+        public Action<Action> UpdateAktion;
+        public void UpdateStatusZeigen(string status, string knopf, bool aktiv)
+        {
+            if (lbUpdateStatus == null || lbUpdateStatus.IsDisposed) return;
+            lbUpdateStatus.Text = status;
+            btUpdate.Text = knopf;
+            btUpdate.Enabled = aktiv;
+        }
+
+        // Abgleich zwischen Arbeitsplätzen
+        CheckBox cbAbgleich;
+        TextBox tbAdresse, tbCode, tbPlatz;
+        Label lbCodeHinweis, lbAbgleichStatus;
+        const string CodeHinweis = "Alle Arbeitsplätze mit demselben Code sehen dieselben geteilten Felder.";
+        public void AbgleichStatusZeigen(string t) { if (lbAbgleichStatus != null && !lbAbgleichStatus.IsDisposed) lbAbgleichStatus.Text = t; }
 
         static int Px(double px)
         {
@@ -129,10 +150,26 @@ namespace Lageuhr
             FarbknopfZeigen(btSchriftfarbe, schriftfarbe, "Schrift");
             FarbknopfZeigen(btHintergrund, hintergrund, "Hintergrund");
 
+            // ---------- Abgleich zwischen Arbeitsplätzen ----------
+            g = Gruppe(links, "Abgleich zwischen Arbeitsplätzen");
+            cbAbgleich = Haken("Felder mit anderen Arbeitsplätzen abgleichen");
+            cbAbgleich.Checked = e.AbgleichAn;
+            Ganz(g, cbAbgleich);
+            tbAdresse = new TextBox { Text = e.AbgleichServer, Width = Px(215) };
+            Zeile(g, "Server", tbAdresse);
+            tbCode = new TextBox { Text = e.LageCode, Width = Px(125), CharacterCasing = CharacterCasing.Upper };
+            Zeile(g, "Lage-Code", Reihe(tbCode, Knopf("Neue Lage", (s, a) => NeueLage())));
+            lbCodeHinweis = Hinweis(CodeHinweis, Px(215));
+            Zeile(g, "", lbCodeHinweis);
+            tbPlatz = new TextBox { Text = e.Arbeitsplatz, Width = Px(215) };
+            Zeile(g, "Arbeitsplatz", tbPlatz);
+            lbAbgleichStatus = Hinweis("", Px(215));
+            Zeile(g, "", lbAbgleichStatus);
+
             // ---------- ausgewähltes Feld ----------
             tFeld = Gruppe(rechts, "Ausgewähltes Feld");
             gbFeld = (GroupBox)tFeld.Parent;
-            gbFeld.MinimumSize = new Size(Px(470), Px(400));
+            gbFeld.MinimumSize = new Size(Px(470), Px(450));
 
             lbArt = new Label { AutoSize = true, Font = new Font(Font, FontStyle.Bold), Margin = new Padding(0, Px(4), 0, Px(4)) };
             FeldZeile("art", "Art", lbArt);
@@ -177,8 +214,12 @@ namespace Lageuhr
                 vorlagen.Controls.Add(b);
             }
             FeldZeile("vorlagen", "Farbvorlage", vorlagen);
+            cbGeteilt = Haken("Mit anderen Arbeitsplätzen teilen");
+            FeldZeile("geteilt", "Abgleich", cbGeteilt);
+            lbVon = Hinweis("", Px(330));
+            FeldZeile("von", "", lbVon);
 
-            foreach (var c in new Control[] { cbSichtbar, cbSek, cbEigeneSchrift, cbEigenerGrund })
+            foreach (var c in new Control[] { cbSichtbar, cbSek, cbEigeneSchrift, cbEigenerGrund, cbGeteilt })
                 ((CheckBox)c).CheckedChanged += (s, a) => { FeldFarbenZeigen(); FeldLesen(); };
             tbTitel.TextChanged += (s, a) => FeldLesen();
             tbText.TextChanged += (s, a) => FeldLesen();
@@ -216,6 +257,13 @@ namespace Lageuhr
                 "Bildschirmschoner und der Rechner sperrt sich nicht von selbst.", Px(340)));
             Zeile(g, "Bildschirmschoner", Reihe(Knopf("Als Bildschirmschoner einrichten …", (s, a) => SchonerEinrichten?.Invoke()),
                 Hinweis("Sperre bleibt aktiv")));
+            cbUpdate = Haken("automatisch nach Updates suchen (beim Start und täglich)");
+            cbUpdate.Checked = e.UpdateSuchen;
+            btUpdate = Knopf("Jetzt suchen", (s, a) => UpdateAktion?.Invoke(Anwenden));
+            btUpdate.MinimumSize = new Size(Px(110), 0);
+            Zeile(g, "Update", Reihe(cbUpdate, btUpdate));
+            lbUpdateStatus = Hinweis("", Px(340));
+            Zeile(g, "", lbUpdateStatus);
 
             g = Gruppe(rechts, "Bedienung");
             Ganz(g, Hinweis(
@@ -302,6 +350,7 @@ namespace Lageuhr
             if (i < 0) return;
             var f = e.Felder[i].Kopie();
             f.Id = Guid.NewGuid().ToString("N");
+            f.Geaendert = 0; f.Von = null; f.Bekannt = null; f.Gestempelt = null; // eigenes, neues Feld
             e.Felder.Insert(i + 1, f);
             ListeFuellen();
             liste.SelectedIndex = i + 1;
@@ -365,6 +414,9 @@ namespace Lageuhr
             feldSchrift = f.Schriftfarbe ?? schriftfarbe;
             feldGrund = f.Hintergrund ?? Color.FromArgb(183, 28, 28);
             FeldFarbenZeigen();
+            cbGeteilt.Checked = f.Geteilt;
+            lbVon.Text = !string.IsNullOrEmpty(f.Von) && f.Geaendert > 0 && Abgleich.ZeitAusMs(f.Geaendert) is DateTime um
+                ? "zuletzt geändert von " + f.Von + " um " + Zeit.Taktisch(um, Math.Max(0, cbMonat.SelectedIndex)) : "";
 
             bool zeitlich = f.Art == FeldArt.Seit || f.Art == FeldArt.Termin;
             SuspendLayout();
@@ -374,6 +426,7 @@ namespace Lageuhr
             ZeileZeigen("taktisch", zeitlich);
             ZeileZeigen("intervall", f.Art == FeldArt.Termin);
             ZeileZeigen("sekunden", f.Art == FeldArt.Uhr);
+            ZeileZeigen("von", lbVon.Text.Length > 0);
             btJetzt.Visible = f.Art == FeldArt.Seit;
             for (int k = 1; k < reiheSchnell.Controls.Count; k++) reiheSchnell.Controls[k].Visible = f.Art == FeldArt.Termin;
             ResumeLayout();
@@ -412,6 +465,7 @@ namespace Lageuhr
             f.Groesse = (int)nGroesse.Value;
             f.Schriftfarbe = cbEigeneSchrift.Checked ? feldSchrift : (Color?)null;
             f.Hintergrund = cbEigenerGrund.Checked ? feldGrund : (Color?)null;
+            f.Geteilt = cbGeteilt.Checked;
             liste.Invalidate(liste.GetItemRectangle(i));
         }
 
@@ -480,7 +534,35 @@ namespace Lageuhr
             e.Zeitserver = string.IsNullOrWhiteSpace(tbServer.Text) ? Atomuhr.StandardServer : tbServer.Text.Trim();
             e.VollbildNachMin = VollbildMinuten[Math.Max(0, cbVollbild.SelectedIndex)];
             e.VollbildAlle = cbVollbildAlle.Checked;
+            e.UpdateSuchen = cbUpdate.Checked;
+
+            string code = tbCode.Text.Trim().ToUpperInvariant(), adresse = tbAdresse.Text.Trim();
+            if (Abgleich.CodeSchluessel(code) != Abgleich.CodeSchluessel(e.LageCode) ||
+                Abgleich.AdresseNormal(adresse) != Abgleich.AdresseNormal(e.AbgleichServer))
+            {
+                e.LageStand = 0; // andere Lage: neu beitreten
+                e.LageIds.Clear();
+            }
+            e.AbgleichAn = cbAbgleich.Checked;
+            e.AbgleichServer = adresse;
+            e.LageCode = code;
+            e.Arbeitsplatz = string.IsNullOrWhiteSpace(tbPlatz.Text) ? Environment.MachineName : tbPlatz.Text.Trim();
             uebernehmen(e);
+        }
+
+        void NeueLage()
+        {
+            if (Abgleich.CodeGueltig(tbCode.Text) && MessageBox.Show(this,
+                    "Eine neue Lage anlegen?\n\nDieser Arbeitsplatz verlässt dann die Lage " + tbCode.Text.Trim() +
+                    ". Seine geteilten Felder gehen in die neue Lage.",
+                    "Lageuhr", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            string code = Abgleich.NeuerCode();
+            tbCode.Text = code;
+            cbAbgleich.Checked = true;
+            bool kopiert = false;
+            try { Clipboard.SetText(code); kopiert = true; } catch { }
+            lbCodeHinweis.Text = (kopiert ? "Code kopiert – an die anderen Arbeitsplätze weitergeben." : "Code an die anderen Arbeitsplätze weitergeben.") +
+                " Gilt nach „Übernehmen“ oder „OK“.";
         }
 
         // ---------- Bausteine ----------

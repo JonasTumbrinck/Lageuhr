@@ -220,6 +220,13 @@ final class Steuerung: NSObject, NSMenuDelegate {
     var angedockt: Bool { e.andocken != 0 }
     var klappbar: Bool { angedockt && e.einklappen && !e.durchklickbar }
 
+    // Abgleich zwischen Arbeitsplätzen
+    let abgleich = Abgleich()
+
+    // Update (Update.swift)
+    let update = Update()
+    private var aktualisiertBis: Date?   // nach einem Update kurz „aktualisiert“ im Tooltip zeigen
+
     // Atomuhr
     var zeitStatus = "Noch nicht abgeglichen"
     private var abgleichLaeuft = false
@@ -247,8 +254,14 @@ final class Steuerung: NSObject, NSMenuDelegate {
         huelle.addSubview(ansicht)
         deckkraftSetzen()
         fenster.ignoresMouseEvents = e.durchklickbar
+        if e.arbeitsplatz.isEmpty { e.arbeitsplatz = Abgleich.rechnername }
+        abgleich.lesen = { [unowned self] in self.e }
+        abgleich.schreiben = { [unowned self] neu in self.vomAbgleich(neu) }
+        abgleich.statusGeaendert = { [unowned self] in self.einstellungen?.abgleichStatusZeigen(self.abgleich.statusText(self.e, ausfuehrlich: true)) }
+        update.statusGeaendert = { [unowned self] in self.updateGeaendert() }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.naechsterAbgleich = .distantPast // nach dem Ruhezustand neu abgleichen
+            self?.abgleich.bald()
         }
 
         if mitStatusSymbol {
@@ -258,6 +271,7 @@ final class Steuerung: NSObject, NSMenuDelegate {
             m.delegate = self
             s.menu = m
             statusItem = s
+            updateGeaendert()
         }
 
         aktualisieren(erzwingen: true)
@@ -265,7 +279,12 @@ final class Steuerung: NSObject, NSMenuDelegate {
         einblenden()
         Lagebild.schreiben(e, versatz: Uhr.versatz)
 
-        let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.aktualisieren() }
+        let automatisch = !argumente.contains("--updatetest")
+        let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let s = self else { return }
+            s.aktualisieren(); s.abgleich.takt()
+            s.update.takt(an: s.e.updateSuchen && automatisch) // sucht nur, installiert nie selbst
+        }
         RunLoop.main.add(t, forMode: .common) // läuft auch, während ein Menü offen ist
         timer = t
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
@@ -470,7 +489,16 @@ final class Steuerung: NSObject, NSMenuDelegate {
 
     // MARK: Inhalt
 
-    func bloecke(_ jetzt: Date) -> [Block] { bloeckeBauen(e, jetzt, nachlauf: nachlauf) }
+    func bloecke(_ jetzt: Date) -> [Block] {
+        var b = bloeckeBauen(e, jetzt, nachlauf: nachlauf)
+        if let t = abgleich.warnText(e, jetzt: jetzt) { // Abgleich länger als 30 s getrennt: klein unten im Kasten
+            let grund = NSColor(hex: e.hintergrund), schrift = NSColor(hex: e.schriftfarbe)
+            let farbe = warnfarbe(["#FFC107", "#B26A00"], grund: grund, schrift: schrift)
+            b.append(Block(art: .text, titel: nil, wert: t, zusatz: nil, titelFarbe: farbe, wertFarbe: farbe, zusatzFarbe: farbe,
+                           hintergrund: nil, faktor: 0.6))
+        }
+        return b
+    }
 
     func aktualisieren(erzwingen: Bool = false, jetzt: Date = Uhr.jetzt()) {
         // Wiederkehrende Termine: 5 Minuten nach Beginn auf den nächsten springen
@@ -546,12 +574,21 @@ final class Steuerung: NSObject, NSMenuDelegate {
     }
 
     func geaendert() {
+        abgleich.bald()
         e.speichern()
         Lagebild.schreiben(e, versatz: Uhr.versatz)
         fenster.ignoresMouseEvents = e.durchklickbar
         if !klappbar { eingeklappt = false }
         aktualisieren(erzwingen: true)
         deckkraftSetzen()
+    }
+
+    /// Ergebnis einer Abgleich-Runde übernehmen (Felder von anderen Plätzen, Stand, Signaturen).
+    func vomAbgleich(_ neu: Einstellungen) {
+        e = neu
+        e.speichern()
+        Lagebild.schreiben(e, versatz: Uhr.versatz)
+        aktualisieren(erzwingen: true)
     }
 
     func feldSetzen(_ id: String, _ aendern: (inout Feld) -> Void) {
@@ -655,7 +692,8 @@ final class Steuerung: NSObject, NSMenuDelegate {
             a.runModal()
             return
         }
-        let ziel = URL(fileURLWithPath: Lagebild.echtesZuhause + "/Library/Screen Savers/Lageuhr.saver")
+        let ziel = (Update.schonerUmlenkung ?? URL(fileURLWithPath: Lagebild.echtesZuhause + "/Library/Screen Savers"))
+            .appendingPathComponent("Lageuhr.saver")
         do {
             try FileManager.default.createDirectory(at: ziel.deletingLastPathComponent(), withIntermediateDirectories: true)
             if FileManager.default.fileExists(atPath: ziel.path) { try FileManager.default.removeItem(at: ziel) }
@@ -687,6 +725,20 @@ final class Steuerung: NSObject, NSMenuDelegate {
             let i = AktionsEintrag(title: titel, aktion: aktion)
             i.state = an ? .on : .off
             return i
+        }
+        if update.installiert {
+            let i = NSMenuItem(title: update.statusText, action: nil, keyEquivalent: "")
+            i.isEnabled = false
+            m.addItem(i)
+            m.addItem(.separator())
+        } else if let v = update.verfuegbar {
+            let titel = "Update auf \(v.version) installieren …"
+            let i = punkt(titel) { [weak self] in self?.updateFragen(v) }
+            i.attributedTitle = NSAttributedString(string: titel, attributes: [
+                .font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize), .foregroundColor: NSColor.controlAccentColor])
+            i.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
+            m.addItem(i)
+            m.addItem(.separator())
         }
         let einst = punkt("Einstellungen …") { [weak self] in self?.einstellungenOeffnen() }
         einst.attributedTitle = NSAttributedString(string: "Einstellungen …", attributes: [.font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)])
@@ -744,11 +796,27 @@ final class Steuerung: NSObject, NSMenuDelegate {
         m.addItem(punkt("Vollbild-Lagebild jetzt (Taste oder Maus beendet)") { [weak self] in self?.vollbildZeigen() })
         m.addItem(punkt("Als Bildschirmschoner einrichten …") { [weak self] in self?.bildschirmschonerEinrichten() })
         m.addItem(.separator())
-        let abgleich = punkt("Zeit jetzt mit Atomuhr abgleichen") { [weak self] in self?.zeitAbgleichen(server: self?.e.zeitserver) }
-        m.addItem(abgleich)
+        m.addItem(punkt("Zeit jetzt mit Atomuhr abgleichen") { [weak self] in self?.zeitAbgleichen(server: self?.e.zeitserver) })
         let status = NSMenuItem(title: zeitStatus, action: nil, keyEquivalent: "")
         status.isEnabled = false
         m.addItem(status)
+        if update.verfuegbar == nil && !update.installiert {
+            if update.sucht {
+                let i = NSMenuItem(title: "Suche nach Updates …", action: nil, keyEquivalent: "")
+                i.isEnabled = false
+                m.addItem(i)
+            } else {
+                m.addItem(punkt("Nach Update suchen") { [weak self] in self?.updateSuchenManuell() })
+            }
+        }
+
+        if Abgleich.aktiv(e) {
+            m.addItem(.separator())
+            let zustand = NSMenuItem(title: abgleich.statusText(e), action: nil, keyEquivalent: "")
+            zustand.isEnabled = false
+            m.addItem(zustand)
+            m.addItem(punkt("Jetzt abgleichen") { [weak self] in self?.abgleich.runde() })
+        }
 
         m.addItem(.separator())
         m.addItem(punkt("Lageuhr beenden") { NSApp.terminate(nil) })
@@ -775,6 +843,10 @@ final class Steuerung: NSObject, NSMenuDelegate {
             einstellungen?.abgleichen = { [weak self] server, fertig in self?.zeitAbgleichen(server: server, fertig: fertig) }
             einstellungen?.lbZeitStatus.stringValue = zeitStatus
             einstellungen?.schonerEinrichten = { [weak self] in self?.bildschirmschonerEinrichten() }
+            einstellungen?.abgleichJetzt = { [weak self] in self?.abgleich.runde() }
+            einstellungen?.abgleichStatusZeigen(abgleich.statusText(e, ausfuehrlich: true))
+            einstellungen?.updateKnopf = { [weak self] in self?.updateKnopfGeklickt() }
+            updateGeaendert()
         }
         if let id = feld { einstellungen?.auswaehlen(id) }
         NSApp.activate(ignoringOtherApps: true)
@@ -784,9 +856,161 @@ final class Steuerung: NSObject, NSMenuDelegate {
     func uebernehmen(_ neu: Einstellungen) {
         var n = neu
         n.links = e.links; n.oben = e.oben; n.fixiert = e.fixiert; n.durchklickbar = e.durchklickbar
+        // Abgleich: Was während der offenen Einstellungen von anderen Plätzen kam, nicht mit dem alten Stand überschreiben
+        n.felder = Abgleich.felderZusammenfuehren(fenster: n.felder, aktuell: e.felder, beimOeffnen: einstellungen?.startIds ?? [])
+        n.abgleichStand = e.abgleichStand; n.geteilteIds = e.geteilteIds; n.ausstehend = e.ausstehend; n.loeschungen = e.loeschungen
+        // Anderer Lage-Code oder Server: neu beitreten (Stand 0)
+        let neueLage = Abgleich.lage(n) != Abgleich.lage(e)
+        if neueLage {
+            n.abgleichStand = 0; n.geteilteIds = []; n.ausstehend = []; n.loeschungen = [:]
+        }
         e = n
+        if neueLage { abgleich.zuruecksetzen() }
         geaendert()
+        einstellungen?.neuLaden(e)
     }
+
+    // MARK: Update
+
+    /// Menüleisten-Symbol, Tooltip und Einstellungen auf den Stand der Update-Suche bringen.
+    func updateGeaendert() {
+        if let b = statusItem?.button {
+            let da = update.verfuegbar != nil
+            b.image = NSImage(systemSymbolName: da ? "clock.badge.exclamationmark" : "clock", accessibilityDescription: "Lageuhr")
+                ?? NSImage(systemSymbolName: "clock", accessibilityDescription: "Lageuhr")
+            if let v = update.verfuegbar { b.toolTip = "Lageuhr \(Update.version) – Update auf \(v.version) ist da" }
+            else if let bis = aktualisiertBis, Date() < bis { b.toolTip = "Lageuhr auf \(Update.version) aktualisiert" }
+            else { b.toolTip = "Lageuhr \(Update.version)" }
+        }
+        einstellungen?.updateZeigen(update.statusText, verfuegbar: update.verfuegbar != nil, beschaeftigt: update.beschaeftigt)
+    }
+
+    /// Aus dem Menü: suchen und das Ergebnis immer melden.
+    func updateSuchenManuell() {
+        update.suchen { [weak self] r in
+            switch r {
+            case .neu(let i): self?.updateFragen(i)
+            case .aktuell: self?.meldung("Die Lageuhr ist aktuell (\(Update.version)).")
+            case .fehler(let t): self?.meldung("Suche nach Updates fehlgeschlagen", t)
+            }
+        }
+    }
+
+    /// Knopf im Einstellungsfenster: suchen (Ergebnis in der Statuszeile) oder ein gefundenes Update installieren.
+    func updateKnopfGeklickt() {
+        if let v = update.verfuegbar { updateFragen(v) } else { update.suchen() }
+    }
+
+    func updateFragen(_ info: Update.Info) {
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert()
+        a.messageText = "Lageuhr \(info.version) ist da."
+        var t = ""
+        if !info.neu.isEmpty { t += "Neu:\n" + info.neu.map { "• " + $0 }.joined(separator: "\n") + "\n\n" }
+        t += "Die Lageuhr startet danach neu; Felder und Einstellungen bleiben."
+        a.informativeText = t
+        a.addButton(withTitle: "Installieren")
+        a.addButton(withTitle: "Später")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        updateInstallieren(info)
+    }
+
+    func updateInstallieren(_ info: Update.Info, test: Bool = false) {
+        update.installieren(info) { [weak self] r in
+            guard let self = self else { return }
+            switch r {
+            case .success(let (app, warnung)):
+                if test { testAusgabe("installiert: \(app.path)" + (warnung.map { " – Warnung: \($0)" } ?? "")) }
+                else if let w = warnung { self.meldung("Bildschirmschoner nicht ersetzt", w) }
+                self.neuStarten(app, test: test)
+            case .failure(let f):
+                if test { testAusgabe((f.mitDownloadSeite ? "hinweis: " : "fehler: ") + f.text); exit(3) }
+                NSApp.activate(ignoringOtherApps: true)
+                let a = NSAlert()
+                a.messageText = f.mitDownloadSeite ? "Update hier nicht möglich" : "Update fehlgeschlagen"
+                a.informativeText = f.text
+                if f.mitDownloadSeite {
+                    a.addButton(withTitle: "Download-Seite öffnen")
+                    a.addButton(withTitle: "OK")
+                    if a.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(Update.downloadSeite) }
+                } else {
+                    a.runModal()
+                }
+            }
+        }
+    }
+
+    /// Einstellungen sichern, neue App starten (mit --nach-update und Test-Argumenten wie --profil), diese beenden.
+    func neuStarten(_ app: URL, test: Bool = false) {
+        if !argumente.contains("--beispiel") { e.speichern(); positionMerken() }
+        var zusatz: [String] = []
+        if let i = argumente.firstIndex(of: "--profil"), i + 1 < argumente.count { zusatz += ["--profil", argumente[i + 1]] }
+        do {
+            try Update.neuStarten(app, zusatz: zusatz)
+        } catch {
+            if test { testAusgabe("fehler: Neustart – \(error.localizedDescription)"); exit(4) }
+            meldung("Neustart nicht möglich", "Das Update ist installiert. Bitte die Lageuhr von Hand neu starten.")
+            return
+        }
+        if test { testAusgabe("neustart: \(app.path)"); exit(0) }
+        NSApp.terminate(nil)
+    }
+
+    /// Nach dem Neustart durch ein Update: kurzer Hinweis am Menüleisten-Symbol (keine Mitteilung, keine Rechte nötig).
+    func nachUpdate() {
+        let text = "Lageuhr auf \(Update.version) aktualisiert"
+        NSLog("%@", text)
+        aktualisiertBis = Date().addingTimeInterval(3600)
+        updateGeaendert()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let b = self?.statusItem?.button, b.window != nil else { return }
+            let l = NSTextField(labelWithString: text)
+            l.font = .systemFont(ofSize: NSFont.systemFontSize)
+            l.translatesAutoresizingMaskIntoConstraints = false
+            let v = NSView()
+            v.addSubview(l)
+            NSLayoutConstraint.activate([
+                l.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 14),
+                l.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -14),
+                l.topAnchor.constraint(equalTo: v.topAnchor, constant: 10),
+                l.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -10),
+            ])
+            let c = NSViewController()
+            c.view = v
+            let p = NSPopover()
+            p.contentViewController = c
+            p.behavior = .transient
+            p.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) { p.performClose(nil) }
+        }
+    }
+
+    /// Test (--updatetest): ohne Rückfragen suchen und installieren, Ergebnis auf stdout.
+    func updateTest() {
+        testAusgabe("updatetest: Version \(Update.version), Quelle \(Update.quelle), App \(Bundle.main.bundlePath)")
+        update.suchen { [weak self] r in
+            switch r {
+            case .aktuell: testAusgabe("aktuell: Die Lageuhr ist aktuell (\(Update.version))."); exit(0)
+            case .fehler(let t): testAusgabe("fehler: \(t)"); exit(2)
+            case .neu(let i):
+                testAusgabe("neu: \(i.version)" + i.neu.map { " | " + $0 }.joined())
+                self?.updateInstallieren(i, test: true)
+            }
+        }
+    }
+
+    func meldung(_ titel: String, _ text: String = "") {
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert()
+        a.messageText = titel
+        a.informativeText = text
+        a.runModal()
+    }
+}
+
+func testAusgabe(_ t: String) {
+    print(t)
+    fflush(stdout)
 }
 
 final class AktionsEintrag: NSMenuItem {
@@ -808,6 +1032,7 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
     let uebernehmen: (Einstellungen) -> Void
     var beimSchliessen: (() -> Void)?
     private var aktuell: Int?
+    private(set) var startIds: Set<String> = []   // Felder beim Öffnen (Abgleich: inzwischen neue erkennen)
 
     // Felderliste
     let tabelle = NSTableView()
@@ -830,7 +1055,9 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
     let cbEigeneSchrift = NSButton(checkboxWithTitle: "eigene", target: nil, action: nil)
     let cbEigenerGrund = NSButton(checkboxWithTitle: "eigener", target: nil, action: nil)
     let cwFeldSchrift = NSColorWell(), cwFeldGrund = NSColorWell()
-    private enum Zeile: Int { case art, titel, text, zeit, schnell, taktisch, intervall, sekunden, groesse, schrift, grund, vorlagen }
+    let cbGeteilt = NSButton(checkboxWithTitle: "Mit anderen Arbeitsplätzen teilen", target: nil, action: nil)
+    let lbGeaendert = EinstellungenFenster.hinweis("")
+    private enum Zeile: Int { case art, titel, text, zeit, schnell, taktisch, intervall, sekunden, groesse, schrift, grund, vorlagen, geteilt, geaendert }
 
     // Darstellung (ganzer Kasten)
     let tfSchrift = NSTextField(), stSchrift = NSStepper()
@@ -850,10 +1077,22 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
     var schonerEinrichten: (() -> Void)?
     let puVollbild = NSPopUpButton()
     let cbVollbildAlle = NSButton(checkboxWithTitle: "auf allen Bildschirmen", target: nil, action: nil)
+    let cbUpdate = NSButton(checkboxWithTitle: "automatisch nach Updates suchen (beim Start und täglich)", target: nil, action: nil)
+    var btUpdate: NSButton!
+    let lbUpdateStatus = EinstellungenFenster.hinweis("")
+    var updateKnopf: (() -> Void)?
     static let vollbildMinuten = [0, 2, 5, 10, 15, 20, 30, 45, 60]
+
+    // Abgleich zwischen Arbeitsplätzen
+    let cbAbgleich = NSButton(checkboxWithTitle: "an", target: nil, action: nil)
+    let tfAdresse = NSTextField(), tfCode = NSTextField(), tfArbeitsplatz = NSTextField()
+    var btNeueLage: NSButton!, btAbgleichJetzt: NSButton!
+    let lbAbgleichStatus = EinstellungenFenster.hinweis("")
+    var abgleichJetzt: (() -> Void)?
 
     init(_ e: Einstellungen, uebernehmen: @escaping (Einstellungen) -> Void) {
         self.e = e
+        self.startIds = Set(e.felder.map(\.id))
         self.uebernehmen = uebernehmen
         fenster = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 500), styleMask: [.titled, .closable],
                            backing: .buffered, defer: false)
@@ -978,7 +1217,7 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
         scroll.widthAnchor.constraint(equalToConstant: 250).isActive = true
-        scroll.heightAnchor.constraint(equalToConstant: 250).isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: 168).isActive = true
 
         puNeu.addItem(withTitle: "Neues Feld")
         for a in FeldArt.allCases { puNeu.addItem(withTitle: a.name); puNeu.lastItem?.representedObject = a.rawValue }
@@ -1003,7 +1242,8 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
         lbArt.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
         zahlfeld(tfIntervall, stIntervall, min: 0, max: 1440, schritt: 15)
         zahlfeld(tfGroesse, stGroesse, min: 30, max: 300, schritt: 10)
-        for c in [cbSichtbar, cbZeit, cbSek, cbEigeneSchrift, cbEigenerGrund] { c.target = self; c.action = #selector(feldGeaendert) }
+        for c in [cbSichtbar, cbZeit, cbSek, cbEigeneSchrift, cbEigenerGrund, cbGeteilt] { c.target = self; c.action = #selector(feldGeaendert) }
+        lbGeaendert.preferredMaxLayoutWidth = 330
         dpZeit.target = self; dpZeit.action = #selector(feldGeaendert)
         for w in [cwFeldSchrift, cwFeldGrund] {
             w.target = self; w.action = #selector(feldGeaendert)
@@ -1041,6 +1281,8 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
             [label("Schriftfarbe"), Self.reihe([cbEigeneSchrift, cwFeldSchrift])],
             [label("Hintergrund"), Self.reihe([cbEigenerGrund, cwFeldGrund])],
             [label("Farbvorlage"), vorlagenRaster],
+            [label("Abgleich"), cbGeteilt],
+            [label(""), lbGeaendert],
         ])
 
         // --- Darstellung ---
@@ -1075,6 +1317,8 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
         tfServer.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         tfServer.placeholderString = Atomuhr.standardServer
         lbZeitStatus.preferredMaxLayoutWidth = 380
+        lbUpdateStatus.preferredMaxLayoutWidth = 380
+        btUpdate = Self.knopf("Jetzt suchen", self, #selector(updateGeklickt))
         let vollbildHinweis = Self.hinweis("Statt Bildschirmschoner: Lagebild groß nach dieser Zeit ohne Eingabe. Solange an, startet kein Bildschirmschoner und der Rechner sperrt sich nicht von selbst.")
         vollbildHinweis.preferredMaxLayoutWidth = 380
         let zeitRaster = NSGridView()
@@ -1088,12 +1332,39 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
             [label(""), vollbildHinweis],
             [label("Bildschirmschoner"), Self.reihe([Self.knopf("Als Bildschirmschoner einrichten …", self, #selector(schonerKnopf)),
                                                     Self.hinweis("Sperre bleibt aktiv")])],
+            [label("Update"), Self.reihe([cbUpdate, btUpdate], abstand: 10)],
+            [label(""), lbUpdateStatus],
+        ])
+
+        // --- Abgleich zwischen Arbeitsplätzen ---
+        cbAbgleich.target = self; cbAbgleich.action = #selector(abgleichUmgeschaltet)
+        for t in [tfAdresse, tfCode, tfArbeitsplatz] { t.font = .systemFont(ofSize: NSFont.smallSystemFontSize); t.delegate = self }
+        tfAdresse.widthAnchor.constraint(equalToConstant: 236).isActive = true
+        tfAdresse.placeholderString = "https://…/lageuhr/lage.php"
+        tfCode.widthAnchor.constraint(equalToConstant: 150).isActive = true
+        tfCode.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+        tfCode.placeholderString = "XXXX-XXXX-XXXX"
+        tfArbeitsplatz.widthAnchor.constraint(equalToConstant: 236).isActive = true
+        tfArbeitsplatz.placeholderString = Abgleich.rechnername
+        btNeueLage = Self.knopf("Neue Lage", self, #selector(neueLage))
+        btAbgleichJetzt = Self.knopf("Jetzt abgleichen", self, #selector(abgleichKnopf))
+        tfCode.toolTip = "Alle Arbeitsplätze mit gleichem Code und gleichem Server zeigen dieselben geteilten Felder."
+        lbAbgleichStatus.preferredMaxLayoutWidth = 236
+        let abgleichRaster = NSGridView()
+        Self.raster(abgleichRaster, [
+            [label("Abgleich"), Self.reihe([cbAbgleich, btAbgleichJetzt], abstand: 10)],
+            [label("Server"), tfAdresse],
+            [label("Lage-Code"), Self.reihe([tfCode, btNeueLage])],
+            [label("Arbeitsplatz"), tfArbeitsplatz],
+            [label(""), lbAbgleichStatus],
         ])
 
         let hilfe = Self.hinweis("Verschieben: am Griff oben links ziehen · Größe: am Griff unten rechts ziehen oder scrollen · " +
                                  "Menü: Rechtsklick auf den Kasten oder das Uhr-Symbol in der Menüleiste · Einstellungen: Doppelklick")
 
-        let links = NSStackView(views: [Self.gruppe("Felder (von oben nach unten)", liste), Self.gruppe("Ganzer Kasten", darstellung)])
+        let abgleichBox = Self.gruppe("Abgleich zwischen Arbeitsplätzen", abgleichRaster)
+        let kastenBox = Self.gruppe("Ganzer Kasten", darstellung)
+        let links = NSStackView(views: [Self.gruppe("Felder (von oben nach unten)", liste), kastenBox, abgleichBox])
         let feldBox = Self.gruppe("Ausgewähltes Feld", raster)
         let zeitBox = Self.gruppe("Andocken, Atomuhr, Vollbild", zeitRaster)
         let rechts = NSStackView(views: [feldBox, zeitBox])
@@ -1107,7 +1378,15 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
         rechts.distribution = .fill
         feldBox.setContentHuggingPriority(.defaultLow, for: .vertical)        // das Feld füllt die Höhe auf
         zeitBox.setContentHuggingPriority(.defaultHigh + 1, for: .vertical)
+        lbUpdateStatus.stringValue = "Version 0.0.0 ist aktuell (gesucht um 00:00)" // Höhe mit einzeiliger Statuszeile messen
         zeitBox.heightAnchor.constraint(equalToConstant: zeitRaster.fittingSize.height + 36).isActive = true // volle Höhe für Andocken und Atomuhr
+        lbUpdateStatus.stringValue = ""
+        abgleichBox.setContentHuggingPriority(.defaultHigh + 1, for: .vertical)
+        kastenBox.setContentHuggingPriority(.defaultLow, for: .vertical)   // links füllt der Kasten die Höhe auf
+        // Höhe für eine zweizeilige Statuszeile messen
+        lbAbgleichStatus.stringValue = "Abgleich: getrennt seit 0000 – Server antwortet nicht (Zeitüberschreitung)"
+        abgleichBox.heightAnchor.constraint(equalToConstant: abgleichRaster.fittingSize.height + 36).isActive = true
+        lbAbgleichStatus.stringValue = ""
 
         let abbrechen = NSButton(title: "Abbrechen", target: self, action: #selector(abbrechenGeklickt))
         abbrechen.keyEquivalent = "\u{1b}"
@@ -1134,6 +1413,8 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
         ])
         hilfe.preferredMaxLayoutWidth = 420
         fenster.contentView = inhalt
+        // Höhe für das größte Feld (Termin) messen: Text und Sekunden erscheinen nie zusammen mit den Termin-Zeilen
+        zeile(.text, false); zeile(.sekunden, false)
         fenster.setContentSize(inhalt.fittingSize)
     }
 
@@ -1169,6 +1450,15 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
         aktuellZeigen(i)
     }
 
+    /// Nach dem Übernehmen: Felder neu zeigen (mit dem, was der Abgleich inzwischen gebracht hat).
+    func neuLaden(_ neu: Einstellungen) {
+        let id = aktuell.flatMap { $0 < e.felder.count ? e.felder[$0].id : nil }
+        e = neu
+        startIds = Set(e.felder.map(\.id))
+        tabelle.reloadData()
+        auswahl(id.flatMap { i in e.felder.firstIndex { $0.id == i } } ?? (e.felder.isEmpty ? nil : 0))
+    }
+
     func auswaehlen(_ id: String) {
         if let i = e.felder.firstIndex(where: { $0.id == id }) { auswahl(i) }
     }
@@ -1202,6 +1492,7 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
         guard let i = aktuell else { return }
         var f = e.felder[i]
         f.id = UUID().uuidString
+        f.geaendert = 0; f.von = ""; f.bekannt = "" // neues Feld für den Abgleich
         e.felder.insert(f, at: i + 1)
         tabelle.reloadData()
         auswahl(i + 1)
@@ -1244,6 +1535,13 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
         cbEigenerGrund.state = f.hintergrund != nil ? .on : .off
         cwFeldSchrift.color = NSColor(hex: f.schriftfarbe ?? cwSchrift.color.hex)
         cwFeldGrund.color = NSColor(hex: f.hintergrund ?? "#B71C1C")
+        cbGeteilt.state = f.geteilt ? .on : .off
+        if !f.von.isEmpty && f.geaendert > 0 {
+            let d = Date(timeIntervalSince1970: Double(f.geaendert) / 1000)
+            lbGeaendert.stringValue = "zuletzt geändert von \(f.von) um \(Zeit.taktisch(d, max(0, puMonat.indexOfSelectedItem)))"
+        } else { lbGeaendert.stringValue = "" }
+        zeile(.geteilt, cbAbgleich.state == .on)
+        zeile(.geaendert, cbAbgleich.state == .on && !lbGeaendert.stringValue.isEmpty)
 
         zeile(.text, f.art == .text)
         zeile(.zeit, f.art == .seit || f.art == .termin)
@@ -1279,6 +1577,7 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
         f.groesse = max(30, min(300, tfGroesse.integerValue))
         f.schriftfarbe = cbEigeneSchrift.state == .on ? cwFeldSchrift.color.hex : nil
         f.hintergrund = cbEigenerGrund.state == .on ? cwFeldGrund.color.hex : nil
+        f.geteilt = cbGeteilt.state == .on
         e.felder[i] = f
         zeileNeu(i)
     }
@@ -1314,10 +1613,53 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
         tfServer.stringValue = e.zeitserver
         puVollbild.selectItem(at: Self.vollbildMinuten.firstIndex(of: e.vollbildNachMin) ?? 0)
         cbVollbildAlle.state = e.vollbildAlle ? .on : .off
+        cbUpdate.state = e.updateSuchen ? .on : .off
+        cbAbgleich.state = e.abgleich ? .on : .off
+        tfAdresse.stringValue = e.abgleichAdresse
+        tfCode.stringValue = e.lageCode
+        tfArbeitsplatz.stringValue = e.arbeitsplatz
         deckkraftGeaendert()
+        abgleichUmgeschaltet()
+    }
+
+    // MARK: Abgleich
+
+    func abgleichStatusZeigen(_ t: String) { lbAbgleichStatus.stringValue = t }
+
+    @objc func abgleichUmgeschaltet() {
+        let an = cbAbgleich.state == .on
+        for v in [tfAdresse, tfCode, tfArbeitsplatz] { v.isEnabled = an }
+        btNeueLage?.isEnabled = an
+        btAbgleichJetzt?.isEnabled = an
+        if let i = aktuell, i < e.felder.count { aktuellZeigen(i) }
+    }
+
+    @objc func abgleichKnopf() {
+        anwendenGeklickt() // erst die Einstellungen übernehmen (Adresse, Code)
+        abgleichJetzt?()
+    }
+
+    @objc func neueLage() {
+        let code = Abgleich.neuerCode()
+        tfCode.stringValue = code
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(code, forType: .string)
+        let a = NSAlert()
+        a.messageText = "Neue Lage \(code)"
+        a.informativeText = "Der Code ist in der Zwischenablage. Code an die anderen Arbeitsplätze weitergeben – " +
+            "dort unter Abgleich eintragen. Gilt hier nach „Übernehmen“ oder „OK“."
+        a.beginSheetModal(for: fenster)
     }
 
     @objc func schonerKnopf() { schonerEinrichten?() }
+
+    @objc func updateGeklickt() { updateKnopf?() }
+
+    func updateZeigen(_ text: String, verfuegbar: Bool, beschaeftigt: Bool) {
+        lbUpdateStatus.stringValue = text
+        btUpdate.title = verfuegbar ? "Installieren …" : "Jetzt suchen"
+        btUpdate.isEnabled = !beschaeftigt
+    }
 
     @objc func jetztAbgleichen() {
         lbZeitStatus.stringValue = "Gleiche ab …"
@@ -1340,6 +1682,12 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
         e.zeitserver = s.isEmpty ? Atomuhr.standardServer : s
         e.vollbildNachMin = Self.vollbildMinuten[max(0, puVollbild.indexOfSelectedItem)]
         e.vollbildAlle = cbVollbildAlle.state == .on
+        e.updateSuchen = cbUpdate.state == .on
+        e.abgleich = cbAbgleich.state == .on
+        e.abgleichAdresse = tfAdresse.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        e.lageCode = tfCode.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let platz = tfArbeitsplatz.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        e.arbeitsplatz = platz.isEmpty ? Abgleich.rechnername : platz
     }
 
     @objc func kastenVorlage(_ b: NSButton) {
@@ -1360,6 +1708,7 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
         if t === tfIntervall { stIntervall.integerValue = tfIntervall.integerValue }
         if t === tfGroesse { stGroesse.integerValue = tfGroesse.integerValue }
         if t === tfSchrift { stSchrift.doubleValue = tfSchrift.doubleValue; return }
+        if t === tfAdresse || t === tfCode || t === tfArbeitsplatz { return }
         feldGeaendert()
     }
 
@@ -1389,9 +1738,15 @@ final class EinstellungenFenster: NSObject, NSWindowDelegate, NSTextFieldDelegat
 
 // MARK: - Testbilder (--bild <pfad> [hell] [leiste] [jetzt] [einstellungen])
 
-func bildSpeichern(_ v: NSView, _ pfad: String) {
+func bildSpeichern(_ v: NSView, _ pfad: String, grund: NSColor? = nil) {
     v.layoutSubtreeIfNeeded()
     guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
+    if let g = grund { // Fensterhintergrund (zeichnet die Inhaltsansicht nicht selbst)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        v.effectiveAppearance.performAsCurrentDrawingAppearance { g.setFill(); NSRect(origin: .zero, size: rep.size).fill() }
+        NSGraphicsContext.restoreGraphicsState()
+    }
     v.cacheDisplay(in: v.bounds, to: rep)
     try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: pfad))
 }
@@ -1446,6 +1801,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         if argumente.contains("--beispiel") { steuerung.e = beispielEinstellungen(argumente) } // nur zum Testen, wird nicht gespeichert
         steuerung.starten()
+        if argumente.contains("--nach-update") { steuerung.nachUpdate() }
+        if argumente.contains("--updatetest") { steuerung.updateTest() } // Test: ohne Rückfragen suchen und installieren
         if argumente.contains("--vollbildtest") { // Test: nach 1 s Vollbild-Lagebild zeigen
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.steuerung.vollbildZeigen() }
         }
@@ -1457,6 +1814,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let i = argumente.firstIndex(of: "--feld"), i + 1 < argumente.count, let n = Int(argumente[i + 1]) {
                 steuerung.einstellungen?.auswahl(n)
             }
+        }
+        // Test: alle 2 s Bilder vom Kasten und vom Einstellungsfenster (falls offen) in einen Ordner schreiben
+        if let i = argumente.firstIndex(of: "--bilder"), i + 1 < argumente.count {
+            let ordner = argumente[i + 1]
+            try? FileManager.default.createDirectory(atPath: ordner, withIntermediateDirectories: true)
+            let t = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
+                guard let s = self?.steuerung else { return }
+                bildSpeichern(s.ansicht, ordner + "/kasten.png")
+                if let v = s.einstellungen?.fenster.contentView { bildSpeichern(v, ordner + "/einstellungen.png", grund: .windowBackgroundColor) }
+            }
+            RunLoop.main.add(t, forMode: .common)
         }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -1472,6 +1840,13 @@ enum Start {
     static let delegat = AppDelegate()
 
     static func main() {
+        // Test: eigenes Profil (eigene Einstellungen, keine Ablage für den Bildschirmschoner), z. B. für zwei Instanzen nebeneinander
+        if let i = argumente.firstIndex(of: "--profil"), i + 1 < argumente.count {
+            Einstellungen.ablage = UserDefaults(suiteName: "local.lageuhr.test." + argumente[i + 1]) ?? .standard
+        }
+        if let i = argumente.firstIndex(of: "--abgleichtest"), i + 1 < argumente.count { // Test: zwei Arbeitsplätze gegen einen Server
+            AbgleichTest.starten(argumente[i + 1])
+        }
         if argumente.contains("--bild") {
             testbild(argumente)
             exit(0)

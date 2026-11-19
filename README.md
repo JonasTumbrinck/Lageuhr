@@ -42,13 +42,29 @@ sich jede Minute leicht gegen Einbrennen; immer dunkler Grund mit heller Schrift
   Ablage schreiben – er fragt die Lageuhr per systemweiter Nachricht nach dem Stand und merkt sich den letzten.
   Ohne Lageuhr (und ohne gemerkten Stand) zeigt er die Uhrzeit.
 
-Keine Installation, keine Adminrechte; Internet nur für den Atomuhr-Abgleich (abschaltbar).
+**Abgleich zwischen Arbeitsplätzen:** Alle Lageuhren mit demselben **Lage-Code** zeigen dieselben Felder – wer an
+einem Platz die nächste Lagebesprechung oder den Kat-Fall-Beginn ändert, ändert ihn überall (nach wenigen Sekunden).
+Dafür braucht es einmal die kleine Server-Datei `server/lage.php` auf einem Webspace mit HTTPS (Anleitung und Schnittstelle:
+`server/PROTOKOLL.md`). In den Einstellungen → *Abgleich*: Server-Adresse eintragen, an einem Platz *Neue Lage* (erzeugt
+den Code, z. B. `K7P3-QX9M-2DFH`), an den anderen Plätzen denselben Code eintragen. Je Feld lässt sich wählen, ob es
+geteilt wird; Größe, Position und Aussehen des Kastens bleiben je Platz. Bei gleichzeitigen Änderungen gilt die letzte.
+Ohne Verbindung läuft alles mit dem letzten Stand weiter, unten im Kasten steht dann „Abgleich getrennt seit …“.
+
+**Updates:** Die Lageuhr schaut beim Start und einmal am Tag auf GitHub nach einer neuen Version (abschaltbar) und zeigt
+sie im Menü und in den Einstellungen an. Installiert wird **nur auf Klick** – nie mitten im Einsatz von selbst. Die Lageuhr
+ersetzt sich dann an Ort und Stelle (auch auf dem USB-Stick) und startet neu; Felder und Einstellungen bleiben.
+Geladen wird nur über HTTPS mit Prüfsumme (Mac zusätzlich Signaturprüfung). Liegt sie in einem schreibgeschützten
+Ordner (oder am Mac noch im Download-Ordner), kommt ein Hinweis mit Link zum Herunterladen.
+
+Keine Installation, keine Adminrechte; Internet nur für Atomuhr, Abgleich und Update-Suche (alles abschaltbar).
 
 ## Starten
 
+Fertige Dateien: GitHub → *Releases* (`Lageuhr.exe`, `Lageuhr-mac.zip`), oder selbst bauen (siehe unten).
+
 | | Datei | Start |
 |---|---|---|
-| Windows 10/11 | `dist/windows/Lageuhr.exe` (80 KB) | Doppelklick. Beim ersten Mal ggf. „Windows hat den PC geschützt“ → *Weitere Informationen* → *Trotzdem ausführen*. |
+| Windows 10/11 | `dist/windows/Lageuhr.exe` (ca. 100 KB) | Doppelklick. Beim ersten Mal ggf. „Windows hat den PC geschützt“ → *Weitere Informationen* → *Trotzdem ausführen*. |
 | macOS 13+ | `dist/mac/Lageuhr-mac.zip` → `Lageuhr.app` | Entpacken, Doppelklick. Auf anderen Macs beim ersten Mal: Rechtsklick → *Öffnen* (bzw. *Systemeinstellungen → Datenschutz & Sicherheit → Dennoch öffnen*). |
 
 Die Einstellungen bleiben erhalten (auch der Kat-Fall-Beginn):
@@ -75,9 +91,18 @@ Braucht das .NET-SDK (baut die Windows-`.exe` für .NET Framework 4.8, das auf j
 die Xcode-Befehlszeilenwerkzeuge (Mac-App für Apple Silicon und Intel) und `python3` (Programmsymbol).
 
 - `src/` – Windows (C#, WinForms): `Overlay.cs` Kasten (mit Andocken/Lasche), `Atomuhr.cs` (NTP + Web-Ersatz), `Lagebild.cs` (Layout, Vollbild, Ablage für `Lageuhr.scr`), `EinstellungenFenster.cs`, `Einstellungen.cs` (Felder, INI; liest auch den Aufbau von 1.0), `Zeit.cs`
+- `src/Abgleich.cs`, `mac/Abgleich.swift` – Abgleich zwischen Arbeitsplätzen
 - `mac/` – Mac (AppKit): `Gemeinsam.swift` (Zeit, Felder, Layout, Vollbild-Ansicht, Ablage), `Lageuhr.swift` (App), `Schoner.swift` (Bildschirmschoner)
+- `server/` – `lage.php` (Abgleich-Server, PHP 8.1+, ohne Datenbank) und `PROTOKOLL.md`; Test: `LAGEUHR_DATEN=/tmp/x php -S 127.0.0.1:8471` in `server/`
 - Animation in Zeitlupe: `LAGEUHR_ZEITLUPE=10 … --beispiel --dock 2 --animationstest`
 - Testbilder vom Mac-Kasten: `Lageuhr.app/Contents/MacOS/Lageuhr --bild bild.png [hell] [leiste] [jetzt]`;
   Atomuhr prüfen: `… --atomuhr [server]` (auch `host:port`, z. B. gegen einen simulierten Zeitserver)
 
-Version: 1.4.2 (in `src/Lageuhr.csproj` und `bauen.sh`).
+**Neue Version veröffentlichen:** Version in `bauen.sh` und `src/Lageuhr.csproj` erhöhen, in `neu.txt` stichwortartig
+schreiben, was neu ist, `./bauen.sh`, dann ein GitHub-Release `v<version>` mit den drei Dateien `dist/windows/Lageuhr.exe`,
+`dist/mac/Lageuhr-mac.zip` und `dist/lageuhr-version.txt`. Die Lageuhren lesen
+`…/releases/latest/download/lageuhr-version.txt` (Version, SHA-256 der Dateien, `neu …`-Zeilen).
+Testen gegen ein simuliertes GitHub: `LAGEUHR_UPDATE_QUELLE=http://127.0.0.1:<port>` (Ordner mit
+`releases/latest/download/…` und `releases/download/v<version>/…`, bedient mit `php -S`).
+
+Version: 1.5.0 (in `src/Lageuhr.csproj` und `bauen.sh`).

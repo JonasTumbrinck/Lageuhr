@@ -27,17 +27,30 @@ namespace Lageuhr
                 return;
             }
 
+            bool nachUpdate = args.Any(x => string.Equals(x, "--nach-update", StringComparison.OrdinalIgnoreCase));
             var einst = Einstellungen.Laden();
             string name = "Lageuhr_" + ((uint)einst.Pfad.ToLowerInvariant().GetHashCode()).ToString("x8");
-            using (new Mutex(true, name, out bool neu))
+            using (var mutex = new Mutex(true, name, out bool neu))
             {
                 if (!neu)
                 {
-                    MessageBox.Show("Die Lageuhr läuft bereits.\n\nSie ist über das Uhr-Symbol unten rechts in der Taskleiste erreichbar.",
-                        "Lageuhr", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
+                    bool frei = false;
+                    if (nachUpdate) // die alte Fassung beendet sich gerade
+                    {
+                        try { frei = mutex.WaitOne(15000); }
+                        catch (AbandonedMutexException) { frei = true; }
+                    }
+                    if (!frei)
+                    {
+                        MessageBox.Show("Die Lageuhr läuft bereits.\n\nSie ist über das Uhr-Symbol unten rechts in der Taskleiste erreichbar.",
+                            "Lageuhr", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return;
+                    }
+                    einst = Einstellungen.Laden(); // Stand, den die alte Fassung beim Beenden gespeichert hat
                 }
-                Application.Run(new Overlay(einst));
+                new Aktualisierung(Application.ExecutablePath).Aufraeumen(); // Lageuhr.exe.alt vom letzten Update
+                Application.Run(new Overlay(einst, nachUpdate));
+                try { mutex.ReleaseMutex(); } catch { }
             }
         }
 

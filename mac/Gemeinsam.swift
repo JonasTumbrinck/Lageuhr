@@ -211,11 +211,17 @@ struct Feld: Codable, Equatable {
     var hintergrund: String? = nil    // nil = kein eigener Hintergrund
     var groesse = 100          // Prozent der Schriftgröße
     var sichtbar = true
+    // Abgleich zwischen Arbeitsplätzen (siehe Abgleich.swift)
+    var geteilt = true         // mit anderen Arbeitsplätzen teilen (neu: an, außer bei der Uhrzeit)
+    var geaendert: Int64 = 0   // letzte Änderung der geteilten Werte, ms seit 1970 (UTC)
+    var von = ""               // Arbeitsplatz der letzten Änderung
+    var bekannt = ""           // Signatur der geteilten Werte beim letzten Senden/Empfangen
 
     init(_ art: FeldArt, titel: String? = nil, text: String = "") {
         self.art = art
         self.titel = titel ?? art.standardTitel
         self.text = text
+        self.geteilt = art != .uhr
     }
 
     init(from d: Decoder) throws {
@@ -232,6 +238,18 @@ struct Feld: Codable, Equatable {
         hintergrund = try? c.decodeIfPresent(String.self, forKey: .hintergrund)
         groesse = w(.groesse, 100)
         sichtbar = w(.sichtbar, true)
+        geteilt = w(.geteilt, art != .uhr)
+        geaendert = w(.geaendert, Int64(0))
+        von = w(.von, "")
+        bekannt = w(.bekannt, "")
+    }
+
+    static func ms(_ d: Date) -> Int64 { Int64((d.timeIntervalSince1970 * 1000).rounded()) }
+
+    /// Die geteilten Werte in einer Zeichenkette – weicht sie von `bekannt` ab, wurde das Feld hier geändert.
+    var signatur: String {
+        [art.rawValue, titel, text, zeit.map { String(Feld.ms($0)) } ?? "-", String(intervall), sekunden ? "1" : "0",
+         schriftfarbe?.uppercased() ?? "-", hintergrund?.uppercased() ?? "-"].joined(separator: "\u{1F}")
     }
 
     /// Name in Liste und Menü
@@ -259,8 +277,18 @@ struct Einstellungen: Codable {
     var zeitserver = Atomuhr.standardServer
     var vollbildNachMin = 0     // Vollbild-Lagebild nach so vielen Minuten ohne Eingabe (0 = aus)
     var vollbildAlle = true     // auf allen Bildschirmen
+    var updateSuchen = true     // beim Start und täglich nach Updates suchen (nur melden, nie selbst installieren)
     var links: Double? = nil   // linke obere Ecke
     var oben: Double? = nil
+    // Abgleich zwischen Arbeitsplätzen (siehe Abgleich.swift)
+    var abgleich = false
+    var abgleichAdresse = ""
+    var lageCode = ""
+    var arbeitsplatz = ""      // leer = Rechnername
+    var abgleichStand = 0      // letzte rev des Servers
+    var geteilteIds: [String] = []           // um Löschen zu erkennen
+    var ausstehend: [String] = []            // Ids, die noch zum Server müssen
+    var loeschungen: [String: Int64] = [:]   // gelöschte Ids, die noch zum Server müssen (Zeitpunkt in ms)
 
     /// Wiederkehrende Termine 5 Minuten nach Beginn auf den nächsten springen lassen. Liefert true, wenn sich etwas geändert hat.
     mutating func termineWeiterschalten(_ jetzt: Date, nachlauf: TimeInterval = 300) -> Bool {
@@ -268,7 +296,9 @@ struct Einstellungen: Codable {
         for i in felder.indices where felder[i].art == .termin && felder[i].intervall > 0 {
             guard var t = felder[i].zeit, jetzt >= t.addingTimeInterval(nachlauf) else { continue }
             while jetzt >= t.addingTimeInterval(nachlauf) { t = t.addingTimeInterval(Double(felder[i].intervall) * 60) }
+            let abgeglichen = felder[i].bekannt == felder[i].signatur
             felder[i].zeit = t
+            if abgeglichen { felder[i].bekannt = felder[i].signatur } // Weiterschalten macht jeder Platz selbst – keine Änderung zum Senden
             weiter = true
         }
         return weiter
@@ -285,6 +315,8 @@ struct Einstellungen: Codable {
     }
 
     static let schluessel = "einstellungen"
+    /// Ablage der Einstellungen (zum Testen mit --profil eine eigene)
+    static var ablage = UserDefaults.standard
     static let standardHintergrund = "#181D25"
     static var standardFelder: [Feld] { [Feld(.uhr), Feld(.seit), Feld(.termin)] }
 
@@ -298,7 +330,7 @@ struct Einstellungen: Codable {
 
     static func laden() -> Einstellungen {
         let std = Einstellungen()
-        guard let data = UserDefaults.standard.data(forKey: schluessel),
+        guard let data = ablage.data(forKey: schluessel),
               let gespeichert = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let stdData = try? JSONEncoder().encode(std),
               var basis = try? JSONSerialization.jsonObject(with: stdData) as? [String: Any]
@@ -323,7 +355,7 @@ struct Einstellungen: Codable {
     }
 
     func speichern() {
-        if let d = try? JSONEncoder().encode(self) { UserDefaults.standard.set(d, forKey: Self.schluessel) }
+        if let d = try? JSONEncoder().encode(self) { Self.ablage.set(d, forKey: Self.schluessel) }
     }
 
     static func begrenzen(_ pt: Double) -> Double { max(10, min(200, pt)) }
@@ -638,7 +670,8 @@ enum Lagebild {
     private static var beobachter: NSObjectProtocol?
 
     static func schreiben(_ e: Einstellungen, versatz: Double) {
-        if CommandLine.arguments.contains("--beispiel") { return } // Testdaten nicht an den Bildschirmschoner geben
+        // Testdaten und Testprofile nicht an den Bildschirmschoner geben
+        if CommandLine.arguments.contains("--beispiel") || CommandLine.arguments.contains("--profil") { return }
         guard let ed = try? JSONEncoder().encode(e),
               let d = try? JSONEncoder().encode(Daten(einstellungen: ed, versatz: versatz, stand: Date())),
               let text = String(data: d, encoding: .utf8) else { return }
